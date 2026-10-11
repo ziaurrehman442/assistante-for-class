@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "Class Notes",
+    "slug": "class-notes-local",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "usesCleartextTraffic": true
+    },
+    "plugins": [
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow Class Notes to record your lectures."
+        }
+      ]
+    ]
+  }
+}

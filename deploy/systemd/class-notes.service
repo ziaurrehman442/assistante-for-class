@@ -1,0 +1,28 @@
+[Unit]
+Description=Class Notes Flask API
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=class-notes
+Group=class-notes
+WorkingDirectory=/opt/class-notes
+EnvironmentFile=/etc/class-notes/class-notes.env
+Environment=HOME=/var/lib/class-notes
+Environment=HF_HOME=/var/cache/class-notes/huggingface
+Environment=XDG_CACHE_HOME=/var/cache/class-notes
+StateDirectory=class-notes
+CacheDirectory=class-notes
+UMask=0077
+ExecStart=/opt/class-notes/.venv/bin/gunicorn --workers 1 --threads 4 --bind 127.0.0.1:5000 --timeout 120 --access-logfile - --error-logfile - run:app
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/class-notes /var/cache/class-notes
+
+[Install]
+WantedBy=multi-user.target
