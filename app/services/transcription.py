@@ -70,6 +70,11 @@ def transcribe_audio(audio_path: Path) -> list[dict[str, float | str]]:
             initial_prompt=MULTILINGUAL_TRANSCRIPTION_PROMPT,
             word_timestamps=True,
             vad_filter=True,
+            # Without this, Whisper conditions each window on its own previous
+            # output. On Urdu or noisy audio a single misheard token becomes a
+            # seed that it then repeats to the end of the window, which both
+            # pollutes the transcript and makes decoding run for many minutes.
+            condition_on_previous_text=False,
         )
         words = []
         for segment in segments:
