@@ -37,6 +37,33 @@ def _prune_expired_jobs(now):
         del _client_jobs[client_id]
 
 
+def _keep_uploaded_audio(app) -> bool:
+    config = getattr(app, "config", None)
+    if not isinstance(config, dict):
+        return False
+    return bool(config.get("KEEP_UPLOADED_AUDIO"))
+
+
+def _prune_expired_uploads(app, now):
+    """Delete retained uploads once they are older than the retention window."""
+    retention_days = app.config.get("UPLOAD_RETENTION_DAYS")
+    if not isinstance(retention_days, int) or retention_days <= 0:
+        return
+    upload_folder = Path(app.config["UPLOAD_FOLDER"])
+    if not upload_folder.is_dir():
+        return
+    cutoff = now - timedelta(days=retention_days)
+    for path in upload_folder.iterdir():
+        try:
+            if not path.is_file():
+                continue
+            modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            if modified < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Could not remove expired upload %s", path, exc_info=True)
+
+
 def _run_job(app, job_id: str, audio_path: Path):
     with _jobs_lock:
         _jobs[job_id]["status"] = "processing"
@@ -68,7 +95,8 @@ def _run_job(app, job_id: str, audio_path: Path):
                 updated_at=_now(),
             )
     finally:
-        audio_path.unlink(missing_ok=True)
+        if not _keep_uploaded_audio(app):
+            audio_path.unlink(missing_ok=True)
 
 
 def enqueue_audio_job(
@@ -80,6 +108,8 @@ def enqueue_audio_job(
     now = _now()
     with _jobs_lock:
         _prune_expired_jobs(now)
+        if _keep_uploaded_audio(app):
+            _prune_expired_uploads(app, now)
         if client_idempotency_key:
             existing = _client_jobs.get(client_idempotency_key)
             if existing:

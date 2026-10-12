@@ -213,6 +213,35 @@ class AudioApiTests(unittest.TestCase):
         self.assertEqual(next_recording["speaker-x"]["display_name"], "Teacher")
         self.assertTrue(next_recording["speaker-x"]["is_named"])
 
+    def test_short_speaker_turn_does_not_fail_the_recording(self):
+        # Pyannote yields an all-NaN embedding when a speaker turn is under
+        # roughly two seconds, because the pooling layer cannot compute a
+        # variance across so few frames. That must not fail the whole job.
+        path = Path(self.upload_dir.name) / "speaker_profiles.json"
+        speakers = _assign_speaker_profiles(
+            ["speaker-short", "speaker-long"],
+            [[float("nan")] * 4, [1.0, 0.0]],
+            path,
+            match_threshold=0.78,
+        )
+        self.assertEqual(speakers["speaker-short"]["display_name"], "Speaker 1")
+        self.assertFalse(speakers["speaker-short"]["is_named"])
+        self.assertEqual(speakers["speaker-long"]["display_name"], "Speaker 2")
+        # Only the usable embedding is persisted; the degenerate one is skipped
+        # so it can never be cosine-matched against a later recording.
+        self.assertEqual(len(load_profiles(path)), 1)
+
+    def test_zero_embedding_does_not_fail_the_recording(self):
+        path = Path(self.upload_dir.name) / "speaker_profiles.json"
+        speakers = _assign_speaker_profiles(
+            ["speaker-zero"],
+            [[0.0, 0.0, 0.0]],
+            path,
+            match_threshold=0.78,
+        )
+        self.assertEqual(speakers["speaker-zero"]["display_name"], "Speaker 1")
+        self.assertEqual(load_profiles(path), [])
+
     def test_diarization_requires_hugging_face_token(self):
         with self.assertRaisesRegex(SpeakerDiarizationError, "HF_TOKEN"):
             diarize_and_label(

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from threading import Lock
 
@@ -26,6 +27,10 @@ MULTILINGUAL_TRANSCRIPTION_PROMPT = (
 )
 
 
+DEFAULT_WHISPER_MODEL = "medium"
+DEFAULT_WHISPER_COMPUTE_TYPE = "int8"
+
+
 def _get_model():
     global _model
     if _model is None:
@@ -34,11 +39,24 @@ def _get_model():
                 try:
                     from faster_whisper import WhisperModel
 
-                    _model = WhisperModel("small", device="cpu", compute_type="int8")
+                    # Read straight from the environment because this helper has
+                    # no application context. "small" transcribes Urdu badly on
+                    # CPU, so "medium" is the default; see WHISPER_MODEL in
+                    # .env.example.
+                    model_name = (
+                        os.environ.get("WHISPER_MODEL") or DEFAULT_WHISPER_MODEL
+                    ).strip()
+                    compute_type = (
+                        os.environ.get("WHISPER_COMPUTE_TYPE")
+                        or DEFAULT_WHISPER_COMPUTE_TYPE
+                    ).strip()
+                    _model = WhisperModel(
+                        model_name, device="cpu", compute_type=compute_type
+                    )
                 except Exception as error:
                     raise TranscriptionError(
-                        "Could not initialize Faster-Whisper. Check the installation "
-                        "and that the small model can be downloaded."
+                        "Could not initialize Faster-Whisper. Check the installation, "
+                        "the WHISPER_MODEL value, and that the model can be downloaded."
                     ) from error
     return _model
 
@@ -124,13 +142,13 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
     return numerator / (left_norm * right_norm)
 
 
-def _normalize_embedding(values) -> list[float]:
+def _normalize_embedding(values) -> list[float] | None:
     import numpy as np
 
     embedding = np.asarray(values, dtype=np.float32).reshape(-1)
     norm = float(np.linalg.norm(embedding))
     if norm == 0 or not np.isfinite(embedding).all():
-        raise SpeakerDiarizationError("Diarization produced an invalid speaker profile.")
+        return None
     return (embedding / norm).astype(float).tolist()
 
 
@@ -152,6 +170,21 @@ def _assign_speaker_profiles(
         unnamed_number = 0
 
         for label, vector in zip(labels, vectors):
+            if vector is None:
+                # Pyannote returns an all-NaN embedding when a speaker turn is
+                # too short to compute variance across its frames (roughly
+                # under two seconds), so no usable voice profile exists. Keep
+                # the recording usable instead of failing the whole job: label
+                # the speaker for this file only, without storing a profile
+                # that could never be matched against a later recording.
+                unnamed_number += 1
+                speakers[label] = {
+                    "id": uuid.uuid4().hex,
+                    "display_name": f"Speaker {unnamed_number}",
+                    "is_named": False,
+                }
+                continue
+
             candidates = [
                 (profile, _cosine_similarity(vector, profile["embedding"]))
                 for profile in profiles
@@ -161,9 +194,11 @@ def _assign_speaker_profiles(
 
             if best is not None and best[1] >= match_threshold:
                 profile = best[0]
-                profile["embedding"] = _normalize_embedding(
+                merged = _normalize_embedding(
                     [old + new for old, new in zip(profile["embedding"], vector)]
                 )
+                if merged is not None:
+                    profile["embedding"] = merged
             else:
                 profile = {
                     "id": uuid.uuid4().hex,

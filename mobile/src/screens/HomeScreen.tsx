@@ -154,6 +154,40 @@ export function HomeScreen() {
     }
   }
 
+  async function reprocessRecording(recording: ClassRecording) {
+    try {
+      const latest = await loadRecordings();
+      const updated = latest.map((item) =>
+        item.id === recording.id
+          ? {
+              ...item,
+              status: "PENDING_SYNC" as const,
+              processingJobId: undefined,
+              lastError: undefined,
+              // Clear the old results so stale notes are never mistaken for
+              // the outcome of the re-run.
+              transcript: undefined,
+              dialogue: undefined,
+              speakers: undefined,
+              materials: undefined,
+              attempt: (item.attempt ?? 1) + 1,
+            }
+          : item,
+      );
+      await saveRecordings(updated);
+      setRecordings(updated);
+      setSpeakerDrafts({});
+      if (isOnline) {
+        await syncPendingRecordings();
+        await refreshRecordings();
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Could not re-process this recording.";
+      Alert.alert("Could not re-process", message);
+    }
+  }
+
   async function togglePlayback(recording: ClassRecording) {
     try {
       if (playingId === recording.id && playerStatus.playing) {
@@ -461,6 +495,16 @@ export function HomeScreen() {
               }
             >
               <Text style={styles.syncNowText}>Sync now</Text>
+            </Pressable>
+          ) : null}
+          {item.status === "SYNCED" ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Re-process this recording"
+              style={styles.syncNow}
+              onPress={() => void reprocessRecording(item)}
+            >
+              <Text style={styles.syncNowText}>Re-process</Text>
             </Pressable>
           ) : null}
         </View>

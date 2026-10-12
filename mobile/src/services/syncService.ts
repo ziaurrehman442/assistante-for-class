@@ -226,7 +226,12 @@ async function syncQueue(): Promise<void> {
           uploadType: UploadType.MULTIPART,
           fieldName: "file",
           mimeType: "audio/mp4",
-          headers: { "X-Client-Recording-Id": recording.id },
+          // The attempt counter keeps the server's two-hour idempotency cache
+          // from handing back the previous job when a recording is deliberately
+          // re-processed after a bad transcript.
+          headers: {
+            "X-Client-Recording-Id": `${recording.id}:${recording.attempt ?? 1}`,
+          },
         });
         let queued: unknown;
         try {

@@ -37,6 +37,11 @@ class Config:
     OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
     OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
     OLLAMA_TIMEOUT_SECONDS = int(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "300"))
+    # Faster-Whisper runs on CPU. "small" mis-transcribes Urdu and
+    # English-Urdu code-switching badly, so "medium" is the default; it needs
+    # roughly 2.5-3 GB of RAM while a recording is being processed.
+    WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "medium")
+    WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
     HUGGINGFACE_TOKEN = os.environ.get("HF_TOKEN")
     SPEAKER_PROFILES_PATH = Path(
         os.environ.get(
@@ -48,3 +53,14 @@ class Config:
     PROCESS_AUDIO_RATE_WINDOW_SECONDS = int(
         os.environ.get("PROCESS_AUDIO_RATE_WINDOW_SECONDS", "60")
     )
+    # Processed audio is normally deleted straight after the job finishes. When
+    # retention is enabled the upload is kept so a recording can be transcribed
+    # again with a different model, and expired files are swept on the next
+    # upload. Recordings are sensitive, so this defaults to off.
+    KEEP_UPLOADED_AUDIO = os.environ.get("KEEP_UPLOADED_AUDIO", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    UPLOAD_RETENTION_DAYS = int(os.environ.get("UPLOAD_RETENTION_DAYS", "7"))
