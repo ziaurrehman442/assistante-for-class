@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,6 +38,48 @@ class TranscriptionTests(unittest.TestCase):
         self.assertIn("Urdu", options["initial_prompt"])
         self.assertIn("English", options["initial_prompt"])
         self.assertIn("without translating", options["initial_prompt"])
+
+    @patch("app.services.transcription._get_model")
+    def test_transcription_enables_vad_and_wide_beam_search(self, get_model):
+        get_model.return_value.transcribe.return_value = ([], None)
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WHISPER_BEAM_SIZE", None)
+            os.environ.pop("WHISPER_MIN_SILENCE_MS", None)
+            transcribe_audio(Path("lesson.wav"))
+
+        options = get_model.return_value.transcribe.call_args.kwargs
+        self.assertTrue(options["vad_filter"])
+        self.assertEqual(options["vad_parameters"]["min_silence_duration_ms"], 500)
+        self.assertEqual(options["beam_size"], 5)
+
+    @patch("app.services.transcription._get_model")
+    def test_beam_size_and_silence_window_come_from_the_environment(self, get_model):
+        get_model.return_value.transcribe.return_value = ([], None)
+
+        with patch.dict(
+            os.environ,
+            {"WHISPER_BEAM_SIZE": "8", "WHISPER_MIN_SILENCE_MS": "900"},
+        ):
+            transcribe_audio(Path("lesson.wav"))
+
+        options = get_model.return_value.transcribe.call_args.kwargs
+        self.assertEqual(options["beam_size"], 8)
+        self.assertEqual(options["vad_parameters"]["min_silence_duration_ms"], 900)
+
+    @patch("app.services.transcription._get_model")
+    def test_invalid_accuracy_settings_fall_back_to_the_defaults(self, get_model):
+        get_model.return_value.transcribe.return_value = ([], None)
+
+        with patch.dict(
+            os.environ,
+            {"WHISPER_BEAM_SIZE": "wide", "WHISPER_MIN_SILENCE_MS": "half-a-second"},
+        ):
+            transcribe_audio(Path("lesson.wav"))
+
+        options = get_model.return_value.transcribe.call_args.kwargs
+        self.assertEqual(options["beam_size"], 5)
+        self.assertEqual(options["vad_parameters"]["min_silence_duration_ms"], 500)
 
     @patch(
         "app.services.transcription._assign_speaker_profiles",

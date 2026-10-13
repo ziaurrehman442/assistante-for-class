@@ -42,6 +42,12 @@ class Config:
     # roughly 2.5-3 GB of RAM while a recording is being processed.
     WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "medium")
     WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
+    # Accuracy settings for quiet, distant speech. A wider beam search resolves
+    # more soft, ambiguous words at the cost of CPU time, and a short VAD silence
+    # window keeps the natural pauses and hesitations of a hesitant speaker
+    # instead of treating them as silence to discard.
+    WHISPER_BEAM_SIZE = int(os.environ.get("WHISPER_BEAM_SIZE", "5"))
+    WHISPER_MIN_SILENCE_MS = int(os.environ.get("WHISPER_MIN_SILENCE_MS", "500"))
     # FFmpeg cleanup before transcription: trims the band speech occupies and
     # normalises loudness so quiet passages are not transcribed as silence.
     AUDIO_CLEANING_ENABLED = os.environ.get(

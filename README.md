@@ -53,6 +53,13 @@ Transcription automatically detects the language and is prompted to preserve
 English-Urdu code-switching, using Urdu script for Urdu words and Latin script
 for English words. Generated notes are in clear English while retaining
 important Urdu terms with short meanings when useful.
+Uploads are cleaned with FFmpeg before transcription: the band speech occupies
+is trimmed, loudness is normalised to EBU R128, and the result is resampled to
+16 kHz mono. Configure this with the `AUDIO_CLEANING_*` values, including
+`AUDIO_CLEANING_ENABLED=false` to transcribe the upload untouched.
+Transcription accuracy for quiet or distant speech is tuned with
+`WHISPER_BEAM_SIZE` (higher resolves more soft words, more CPU time) and
+`WHISPER_MIN_SILENCE_MS` (lower keeps a hesitant speaker's short pauses).
 By default the API listens on port 5000 on all network interfaces so a phone
 on the same trusted LAN can reach it.
 Set `SERVER_HOST=127.0.0.1` to restrict it to this computer, or configure

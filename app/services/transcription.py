@@ -29,6 +29,8 @@ MULTILINGUAL_TRANSCRIPTION_PROMPT = (
 
 DEFAULT_WHISPER_MODEL = "medium"
 DEFAULT_WHISPER_COMPUTE_TYPE = "int8"
+DEFAULT_BEAM_SIZE = 5
+DEFAULT_MIN_SILENCE_MS = 500
 
 
 def _get_model():
@@ -63,13 +65,33 @@ def _get_model():
 
 def transcribe_audio(audio_path: Path) -> list[dict[str, float | str]]:
     try:
+        # Read straight from the environment, like the model name above, because
+        # this helper has no application context. Invalid values fall back to the
+        # accuracy defaults rather than failing an otherwise good recording.
+        try:
+            beam_size = int(os.environ.get("WHISPER_BEAM_SIZE") or DEFAULT_BEAM_SIZE)
+        except ValueError:
+            beam_size = DEFAULT_BEAM_SIZE
+        try:
+            min_silence_ms = int(
+                os.environ.get("WHISPER_MIN_SILENCE_MS") or DEFAULT_MIN_SILENCE_MS
+            )
+        except ValueError:
+            min_silence_ms = DEFAULT_MIN_SILENCE_MS
+
         segments, _ = _get_model().transcribe(
             str(audio_path),
             language=None,
             task="transcribe",
             initial_prompt=MULTILINGUAL_TRANSCRIPTION_PROMPT,
             word_timestamps=True,
+            # Silero voice activity detection strips pauses and room hum before
+            # decoding, so background noise is not transcribed as words.
             vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=min_silence_ms),
+            # A wider beam search keeps more candidate words alive and picks the
+            # best-scoring one, which is what recovers soft or unclear speech.
+            beam_size=beam_size,
             # Without this, Whisper conditions each window on its own previous
             # output. On Urdu or noisy audio a single misheard token becomes a
             # seed that it then repeats to the end of the window, which both
