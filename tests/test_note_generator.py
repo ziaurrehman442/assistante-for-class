@@ -1,5 +1,7 @@
 import json
 import unittest
+
+import requests
 from unittest.mock import patch
 
 from app.services.note_generator import (
@@ -74,6 +76,52 @@ class NoteGeneratorTests(unittest.TestCase):
             generate_study_materials(
                 "Lesson transcript", "http://localhost:11434", "qwen2.5:3b", 300
             )
+
+    @patch("app.services.note_generator.requests.post")
+    def test_retries_a_malformed_response_then_succeeds(self, post):
+        # A small model following a strict schema is not reliable first time.
+        post.return_value.json.side_effect = [
+            {"response": json.dumps({"easy_notes": []})},
+            {"response": "not json at all"},
+            {"response": json.dumps(sample_materials())},
+        ]
+
+        materials = generate_study_materials(
+            "Lesson transcript", "http://localhost:11434", "qwen2.5:3b", 300
+        )
+
+        self.assertEqual(materials["revision_quiz"]["mcqs"][0]["question"], "Question 0?")
+        self.assertEqual(post.call_count, 3)
+
+    @patch("app.services.note_generator.requests.post")
+    def test_gives_up_after_the_configured_attempts(self, post):
+        post.return_value.json.return_value = {"response": json.dumps({"easy_notes": []})}
+
+        with self.assertRaises(NoteGenerationError):
+            generate_study_materials(
+                "Lesson transcript",
+                "http://localhost:11434",
+                "qwen2.5:3b",
+                300,
+                max_attempts=2,
+            )
+
+        self.assertEqual(post.call_count, 2)
+
+    @patch("app.services.note_generator.requests.post")
+    def test_transport_errors_are_not_retried(self, post):
+        post.side_effect = requests.RequestException("connection refused")
+
+        with self.assertRaises(NoteGenerationError):
+            generate_study_materials(
+                "Lesson transcript",
+                "http://localhost:11434",
+                "qwen2.5:3b",
+                300,
+                max_attempts=3,
+            )
+
+        self.assertEqual(post.call_count, 1)
 
 
 if __name__ == "__main__":

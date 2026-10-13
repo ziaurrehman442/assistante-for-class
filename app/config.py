@@ -42,6 +42,19 @@ class Config:
     # roughly 2.5-3 GB of RAM while a recording is being processed.
     WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "medium")
     WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
+    # FFmpeg cleanup before transcription: trims the band speech occupies and
+    # normalises loudness so quiet passages are not transcribed as silence.
+    AUDIO_CLEANING_ENABLED = os.environ.get(
+        "AUDIO_CLEANING_ENABLED", "true"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    AUDIO_CLEANING_HIGHPASS_HZ = int(os.environ.get("AUDIO_CLEANING_HIGHPASS_HZ", "200"))
+    AUDIO_CLEANING_LOWPASS_HZ = int(os.environ.get("AUDIO_CLEANING_LOWPASS_HZ", "3000"))
+    AUDIO_CLEANING_TARGET_LUFS = os.environ.get("AUDIO_CLEANING_TARGET_LUFS", "-16")
+    AUDIO_CLEANING_TRUE_PEAK = os.environ.get("AUDIO_CLEANING_TRUE_PEAK", "-1.5")
+    AUDIO_CLEANING_LOUDNESS_RANGE = os.environ.get("AUDIO_CLEANING_LOUDNESS_RANGE", "11")
+    AUDIO_CLEANING_TIMEOUT_SECONDS = int(
+        os.environ.get("AUDIO_CLEANING_TIMEOUT_SECONDS", "600")
+    )
     HUGGINGFACE_TOKEN = os.environ.get("HF_TOKEN")
     SPEAKER_PROFILES_PATH = Path(
         os.environ.get(
@@ -64,3 +77,20 @@ class Config:
         "on",
     }
     UPLOAD_RETENTION_DAYS = int(os.environ.get("UPLOAD_RETENTION_DAYS", "7"))
+    # Optional cleanup of a transcript through a text model, which repairs the
+    # mixed-script output that speech-to-text produces for Urdu/English
+    # code-switching. It can only reword turns; a failure always falls back to
+    # the raw transcript. Off by default because it sends lecture content to a
+    # third-party API.
+    TRANSCRIPT_REFINER_ENABLED = os.environ.get(
+        "TRANSCRIPT_REFINER_ENABLED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    OPENCODE_BASE_URL = os.environ.get("OPENCODE_BASE_URL", "https://opencode.nexa.website")
+    OPENCODE_USER = os.environ.get("OPENCODE_USER")
+    OPENCODE_PASSWORD = os.environ.get("OPENCODE_PASSWORD")
+    TRANSCRIPT_REFINER_MODEL = os.environ.get(
+        "TRANSCRIPT_REFINER_MODEL", "space-bunny-free"
+    )
+    TRANSCRIPT_REFINER_TIMEOUT_SECONDS = int(
+        os.environ.get("TRANSCRIPT_REFINER_TIMEOUT_SECONDS", "120")
+    )

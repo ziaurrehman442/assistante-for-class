@@ -1,6 +1,10 @@
 import json
+import logging
 
 import requests
+
+
+logger = logging.getLogger(__name__)
 
 
 class NoteGenerationError(Exception):
@@ -154,6 +158,7 @@ def generate_study_materials(
     ollama_url: str,
     model: str,
     timeout: int,
+    max_attempts: int = 3,
 ) -> dict[str, object]:
     prompt = (
         "Turn the following class transcript into useful study materials. "
@@ -175,34 +180,59 @@ def generate_study_materials(
         f"CLASS DIALOGUE:\n{transcript}"
     )
 
-    try:
-        response = requests.post(
-            f"{ollama_url.rstrip('/')}/api/generate",
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "format": STUDY_MATERIAL_SCHEMA,
-            },
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        result = response.json()
-        if not isinstance(result, dict):
-            raise NoteGenerationError("Ollama returned an invalid response.")
-        materials = result.get("response")
-        if not isinstance(materials, str) or not materials.strip():
-            raise NoteGenerationError("Ollama returned an empty response.")
-        parsed = json.loads(materials)
-        if not isinstance(parsed, dict) or not _validate_materials(parsed):
-            raise NoteGenerationError(
-                "Ollama returned study materials that do not match the required structure."
+    last_error: NoteGenerationError | None = None
+    for attempt in range(1, max(1, max_attempts) + 1):
+        try:
+            response = requests.post(
+                f"{ollama_url.rstrip('/')}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": STUDY_MATERIAL_SCHEMA,
+                },
+                timeout=timeout,
             )
-        return parsed
-    except NoteGenerationError:
-        raise
-    except (requests.RequestException, ValueError, TypeError) as error:
-        raise NoteGenerationError(
-            "Could not generate study materials. Confirm Ollama is running locally "
-            "and that the configured model is available."
-        ) from error
+            response.raise_for_status()
+            result = response.json()
+            if not isinstance(result, dict):
+                raise NoteGenerationError("Ollama returned an invalid response.")
+            materials = result.get("response")
+            if not isinstance(materials, str) or not materials.strip():
+                raise NoteGenerationError("Ollama returned an empty response.")
+            parsed = json.loads(materials)
+            if not isinstance(parsed, dict) or not _validate_materials(parsed):
+                # A small model following a strict schema is not reliable on the
+                # first try, so a retry is far cheaper than failing the whole
+                # recording after transcription has already succeeded.
+                raise NoteGenerationError(
+                    "Ollama returned study materials that do not match the "
+                    "required structure."
+                )
+            return parsed
+        except json.JSONDecodeError as error:
+            last_error = NoteGenerationError(
+                "Ollama returned a response that was not valid JSON."
+            )
+            logger.warning(
+                "Study material attempt %d/%d returned invalid JSON: %s",
+                attempt,
+                max_attempts,
+                error,
+            )
+        except NoteGenerationError as error:
+            last_error = error
+            logger.warning(
+                "Study material attempt %d/%d failed: %s",
+                attempt,
+                max_attempts,
+                error,
+            )
+        except (requests.RequestException, ValueError, TypeError) as error:
+            # Transport-level problems will not improve by asking again.
+            raise NoteGenerationError(
+                "Could not generate study materials. Confirm Ollama is running "
+                "locally and that the configured model is available."
+            ) from error
+
+    raise last_error or NoteGenerationError("Could not generate study materials.")
