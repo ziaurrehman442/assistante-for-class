@@ -35,7 +35,7 @@ class Config:
     )
     MAX_CONTENT_LENGTH = 100 * 1024 * 1024
     OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-    OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
+    OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:1.5b")
     # Generation on a 4 vCPU box runs at roughly 5 tokens/second, so a full set
     # of study materials takes several minutes. A timeout below the real
     # generation time turns a working Ollama into a failed job, so this is set
