@@ -11,6 +11,80 @@ class NoteGenerationError(Exception):
     pass
 
 
+def model_missing_message(model: str) -> str:
+    """The actionable message shown when Ollama does not have the model."""
+    return (
+        f"Ollama model {model} is not loaded. "
+        f"Run 'ollama pull {model}' in your terminal."
+    )
+
+
+def _split_model_name(value: str) -> tuple[str, str]:
+    base, _, tag = value.strip().partition(":")
+    return base, tag or "latest"
+
+
+def _installed_model_names(ollama_url: str, timeout: int) -> list[str]:
+    try:
+        response = requests.get(
+            f"{ollama_url.rstrip('/')}/api/tags",
+            timeout=timeout,
+        )
+    except requests.RequestException as error:
+        raise NoteGenerationError(
+            f"Ollama is not reachable at {ollama_url}. Start it with 'ollama serve' "
+            "and check that OLLAMA_URL points at the right host and port."
+        ) from error
+
+    if response.status_code != 200:
+        raise NoteGenerationError(
+            f"Ollama answered /api/tags with HTTP {response.status_code}, so its "
+            "state could not be checked."
+        )
+
+    try:
+        payload = response.json()
+    except ValueError as error:
+        raise NoteGenerationError(
+            "Ollama returned an unreadable response from /api/tags."
+        ) from error
+
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        raise NoteGenerationError(
+            "Ollama returned an unexpected response from /api/tags."
+        )
+    return [
+        entry["name"]
+        for entry in models
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+    ]
+
+
+def check_ollama_available(ollama_url: str, model: str, timeout: int) -> None:
+    """Fail fast, with an actionable message, before a long generation starts.
+
+    Ollama stays up and answers happily while a model it does not have is
+    requested, and the failure only surfaces as a bare 404 several minutes into
+    a generation. Checking first turns that into an immediate, specific error.
+    """
+    if not any(
+        _split_model_name(name) == _split_model_name(model)
+        for name in _installed_model_names(ollama_url, timeout)
+    ):
+        raise NoteGenerationError(model_missing_message(model))
+
+
+def _ollama_error_detail(response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return (response.text or "").strip()[:300]
+    if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+        return payload["error"][:300]
+    return ""
+
+
 def format_dialogue(dialogue: list[dict]) -> str:
     lines = []
     for turn in dialogue:
@@ -159,7 +233,10 @@ def generate_study_materials(
     model: str,
     timeout: int,
     max_attempts: int = 3,
+    availability_timeout: int = 5,
 ) -> dict[str, object]:
+    check_ollama_available(ollama_url, model, availability_timeout)
+
     prompt = (
         "Turn the following class transcript into useful study materials. "
         "The class may code-switch between spoken Urdu and English within a "
@@ -243,7 +320,33 @@ def generate_study_materials(
                 max_attempts,
                 error,
             )
-        except (requests.RequestException, ValueError, TypeError) as error:
+        except requests.Timeout as error:
+            # The most common failure on a small CPU server: generation is slow
+            # but healthy, and only the configured timeout decides it failed.
+            raise NoteGenerationError(
+                f"Ollama was still generating after {timeout} seconds. Raise "
+                "OLLAMA_TIMEOUT_SECONDS, or use a smaller model, so the "
+                "recording is not discarded after transcription has already "
+                "succeeded."
+            ) from error
+        except requests.HTTPError as error:
+            response = error.response
+            status = response.status_code if response is not None else "unknown"
+            detail = _ollama_error_detail(response) if response is not None else ""
+            # Ollama reports an unknown model as 404, and as 400 on some builds.
+            if status in (400, 404) and "not found" in detail.lower():
+                raise NoteGenerationError(model_missing_message(model)) from error
+            raise NoteGenerationError(
+                f"Ollama returned HTTP {status} while generating study materials"
+                + (f": {detail}" if detail else ".")
+            ) from error
+        except requests.RequestException as error:
+            raise NoteGenerationError(
+                f"Ollama became unreachable while generating study materials "
+                f"({type(error).__name__}). Confirm 'ollama serve' is still "
+                "running and the server has not run out of memory."
+            ) from error
+        except (ValueError, TypeError) as error:
             # Transport-level problems will not improve by asking again.
             raise NoteGenerationError(
                 "Could not generate study materials. Confirm Ollama is running "

@@ -2,13 +2,31 @@ import json
 import unittest
 
 import requests
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app.services.note_generator import (
     NoteGenerationError,
+    check_ollama_available,
     format_dialogue,
     generate_study_materials,
 )
+
+
+def tags_response(*names):
+    response = requests.Response()
+    response.status_code = 200
+    response._content = json.dumps(
+        {"models": [{"name": name} for name in names]}
+    ).encode("utf-8")
+    return response
+
+
+def available_ollama(*names):
+    # new= is used so the decorator injects no argument into the test method.
+    return patch(
+        "app.services.note_generator.requests.get",
+        new=Mock(return_value=tags_response(*(names or ("qwen2.5:3b",)))),
+    )
 
 
 def sample_materials():
@@ -50,6 +68,7 @@ class NoteGeneratorTests(unittest.TestCase):
             "[01:05] Teacher (overlapping with Student 1): Welcome back.",
         )
 
+    @available_ollama()
     @patch("app.services.note_generator.requests.post")
     def test_generates_structured_study_materials(self, post):
         post.return_value.json.return_value = {
@@ -68,6 +87,7 @@ class NoteGeneratorTests(unittest.TestCase):
         self.assertIn("Urdu and English", prompt)
         self.assertIn("Do not translate the transcript", prompt)
 
+    @available_ollama()
     @patch("app.services.note_generator.requests.post")
     def test_rejects_incomplete_study_materials(self, post):
         post.return_value.json.return_value = {"response": json.dumps({"easy_notes": []})}
@@ -77,6 +97,7 @@ class NoteGeneratorTests(unittest.TestCase):
                 "Lesson transcript", "http://localhost:11434", "qwen2.5:3b", 300
             )
 
+    @available_ollama()
     @patch("app.services.note_generator.requests.post")
     def test_retries_a_malformed_response_then_succeeds(self, post):
         # A small model following a strict schema is not reliable first time.
@@ -93,6 +114,7 @@ class NoteGeneratorTests(unittest.TestCase):
         self.assertEqual(materials["revision_quiz"]["mcqs"][0]["question"], "Question 0?")
         self.assertEqual(post.call_count, 3)
 
+    @available_ollama()
     @patch("app.services.note_generator.requests.post")
     def test_gives_up_after_the_configured_attempts(self, post):
         post.return_value.json.return_value = {"response": json.dumps({"easy_notes": []})}
@@ -108,6 +130,7 @@ class NoteGeneratorTests(unittest.TestCase):
 
         self.assertEqual(post.call_count, 2)
 
+    @available_ollama()
     @patch("app.services.note_generator.requests.post")
     def test_transport_errors_are_not_retried(self, post):
         post.side_effect = requests.RequestException("connection refused")
@@ -126,3 +149,83 @@ class NoteGeneratorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OllamaAvailabilityTests(unittest.TestCase):
+    def test_reports_unreachable_ollama_with_a_startup_hint(self):
+        with patch(
+            "app.services.note_generator.requests.get",
+            side_effect=requests.ConnectionError("refused"),
+        ):
+            with self.assertRaises(NoteGenerationError) as caught:
+                check_ollama_available("http://localhost:11434", "qwen2.5:1.5b", 5)
+
+        self.assertIn("not reachable", str(caught.exception))
+        self.assertIn("ollama serve", str(caught.exception))
+
+    def test_missing_model_names_the_pull_command(self):
+        with patch(
+            "app.services.note_generator.requests.get",
+            return_value=tags_response("qwen2.5:3b"),
+        ):
+            with self.assertRaises(NoteGenerationError) as caught:
+                check_ollama_available("http://localhost:11434", "qwen2.5:1.5b", 5)
+
+        self.assertEqual(
+            str(caught.exception),
+            "Ollama model qwen2.5:1.5b is not loaded. "
+            "Run 'ollama pull qwen2.5:1.5b' in your terminal.",
+        )
+
+    def test_unexpected_tags_payload_is_reported(self):
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"unexpected": true}'
+        with patch("app.services.note_generator.requests.get", return_value=response):
+            with self.assertRaises(NoteGenerationError):
+                check_ollama_available("http://localhost:11434", "qwen2.5:3b", 5)
+
+    def test_installed_model_passes_the_check(self):
+        with patch(
+            "app.services.note_generator.requests.get",
+            return_value=tags_response("qwen2.5:3b", "llama3:8b"),
+        ):
+            check_ollama_available("http://localhost:11434", "qwen2.5:3b", 5)
+
+    @available_ollama("qwen2.5:3b")
+    @patch("app.services.note_generator.requests.post")
+    def test_timeout_raises_a_timeout_specific_error(self, post):
+        post.side_effect = requests.Timeout("read timed out")
+
+        with self.assertRaises(NoteGenerationError) as caught:
+            generate_study_materials("t", "http://localhost:11434", "qwen2.5:3b", 900)
+
+        self.assertIn("900 seconds", str(caught.exception))
+        self.assertIn("OLLAMA_TIMEOUT_SECONDS", str(caught.exception))
+
+    @available_ollama("qwen2.5:3b")
+    @patch("app.services.note_generator.requests.post")
+    def test_model_not_found_during_generation_is_reported(self, post):
+        response = requests.Response()
+        response.status_code = 404
+        response._content = b'{"error":"model \'qwen2.5:3b\' not found"}'
+        post.side_effect = requests.HTTPError(response=response)
+
+        with self.assertRaises(NoteGenerationError) as caught:
+            generate_study_materials("t", "http://localhost:11434", "qwen2.5:3b", 900)
+
+        self.assertIn("ollama pull qwen2.5:3b", str(caught.exception))
+
+    @available_ollama("qwen2.5:3b")
+    @patch("app.services.note_generator.requests.post")
+    def test_generation_does_not_reach_ollama_when_the_model_is_absent(self, post):
+        with patch(
+            "app.services.note_generator.requests.get",
+            return_value=tags_response("llama3:8b"),
+        ):
+            with self.assertRaises(NoteGenerationError):
+                generate_study_materials(
+                    "t", "http://localhost:11434", "qwen2.5:1.5b", 900
+                )
+
+        post.assert_not_called()

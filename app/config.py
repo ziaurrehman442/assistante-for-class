@@ -36,7 +36,16 @@ class Config:
     MAX_CONTENT_LENGTH = 100 * 1024 * 1024
     OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
     OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:3b")
-    OLLAMA_TIMEOUT_SECONDS = int(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "300"))
+    # Generation on a 4 vCPU box runs at roughly 5 tokens/second, so a full set
+    # of study materials takes several minutes. A timeout below the real
+    # generation time turns a working Ollama into a failed job, so this is set
+    # well above the worst case rather than at the default request timeout.
+    OLLAMA_TIMEOUT_SECONDS = int(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "900"))
+    # Kept short: this check only proves the server is up and the model is
+    # installed, so it should fail fast instead of stalling a job.
+    OLLAMA_AVAILABILITY_TIMEOUT_SECONDS = int(
+        os.environ.get("OLLAMA_AVAILABILITY_TIMEOUT_SECONDS", "5")
+    )
     # Faster-Whisper runs on CPU. "small" mis-transcribes Urdu and
     # English-Urdu code-switching badly, so "medium" is the default; it needs
     # roughly 2.5-3 GB of RAM while a recording is being processed.

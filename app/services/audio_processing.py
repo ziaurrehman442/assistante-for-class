@@ -49,6 +49,49 @@ class AudioProcessingError(Exception):
         self.status_code = status_code
 
 
+def _empty_materials(message: str, include_in_topics: bool = False) -> dict[str, object]:
+    """Placeholder study materials with the same keys the mobile tabs render."""
+    return {
+        "detailed_class_notes": {
+            "main_topics": [message] if include_in_topics else [],
+            "definitions": [],
+            "teacher_explanations": [message],
+            "qa": [],
+        },
+        "easy_notes": [message],
+        "revision_quiz": {
+            "mcqs": [],
+            "conceptual_questions": [],
+        },
+    }
+
+
+def _generate_materials_or_degrade(app, transcript: str):
+    """Generate study materials, but never lose a finished transcript to them.
+
+    Transcription is the expensive, irreplaceable part: it needs the recording,
+    which is deleted once the job ends, and CPU minutes that cannot be recovered.
+    If Ollama is unreachable, slow, or missing the model, returning an empty
+    notes section plus a warning keeps that transcript in the user's hands
+    instead of failing the whole job.
+    """
+    from app.services.note_generator import NoteGenerationError
+
+    try:
+        materials = generate_study_materials(
+            transcript,
+            ollama_url=app.config["OLLAMA_URL"],
+            model=app.config["OLLAMA_MODEL"],
+            timeout=app.config["OLLAMA_TIMEOUT_SECONDS"],
+            availability_timeout=app.config["OLLAMA_AVAILABILITY_TIMEOUT_SECONDS"],
+        )
+    except NoteGenerationError as error:
+        logger.warning("Study material generation degraded: %s", error)
+        return _empty_materials("Study materials could not be generated."), [str(error)]
+
+    return materials, []
+
+
 def _cleaned_audio_for(app, audio_path: Path):
     """Clean the upload before transcription, falling back to the original.
 
@@ -116,17 +159,8 @@ def process_audio_file(app, audio_path: Path) -> dict:
                         "transcript": message,
                         "dialogue": [],
                         "speakers": [],
-                        "detailed_class_notes": {
-                            "main_topics": [message],
-                            "definitions": [],
-                            "teacher_explanations": [message],
-                            "qa": [],
-                        },
-                        "easy_notes": [message],
-                        "revision_quiz": {
-                            "mcqs": [],
-                            "conceptual_questions": [],
-                        },
+                        **_empty_materials(message, include_in_topics=True),
+                        "warnings": [],
                     }
 
                 dialogue, speakers = diarize_and_label(
@@ -138,17 +172,16 @@ def process_audio_file(app, audio_path: Path) -> dict:
                 )
                 transcript = format_dialogue(dialogue)
                 transcript = _refine_transcript_if_enabled(app, transcript)
-                materials = generate_study_materials(
-                    transcript,
-                    ollama_url=app.config["OLLAMA_URL"],
-                    model=app.config["OLLAMA_MODEL"],
-                    timeout=app.config["OLLAMA_TIMEOUT_SECONDS"],
-                )
+                materials, warnings = _generate_materials_or_degrade(app, transcript)
                 return {
                     "transcript": transcript,
                     "dialogue": dialogue,
                     "speakers": speakers,
                     **materials,
+                    # An empty list on a healthy run, so the response shape never
+                    # changes. The mobile client ignores it, but a client that
+                    # wants to surface the degraded case can check it.
+                    "warnings": warnings,
                 }
         except TranscriptionError as error:
             logger.warning("Audio transcription failed: %s", error)
