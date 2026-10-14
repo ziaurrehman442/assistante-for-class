@@ -4,7 +4,7 @@ import {
   useAudioPlayer,
   useAudioPlayerStatus,
 } from "expo-audio";
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -89,6 +89,23 @@ export function HomeScreen() {
   const subjectRecordings = recordings.filter(
     (recording) => recording.subjectId === selectedSubjectId,
   );
+
+  const isSyncing = useMemo(
+    () => recordings.some((recording) => recording.status === "SYNCING"),
+    [recordings],
+  );
+
+  // The sync loop persists progress to storage as each poll lands, but this
+  // screen holds recordings in React state, so it has to re-read while a job is
+  // in flight. Without this the progress bar only appeared after the sync
+  // finished. The timer is only mounted while something is actually processing.
+  useEffect(() => {
+    if (!isSyncing) {
+      return;
+    }
+    const id = setInterval(() => void refreshRecordings(), 2000);
+    return () => clearInterval(id);
+  }, [isSyncing, refreshRecordings]);
 
   async function addSubjectFolder() {
     try {
