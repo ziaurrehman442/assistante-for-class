@@ -2,6 +2,7 @@ import {
   AUDIO_PROCESS_ENDPOINT,
   AUDIO_PROCESS_JOBS_ENDPOINT,
 } from "../config";
+import NetInfo from "@react-native-community/netinfo";
 import { File, UploadType } from "expo-file-system";
 import { loadRecordings, saveRecordings } from "./recordingStore";
 import { ClassRecording, RecordingSpeaker, SpeakerTurn, StudyMaterials } from "../types";
@@ -10,6 +11,11 @@ import { isObject, isSpeakerTurn, isStudyMaterials } from "./apiTypes";
 let activeSync: Promise<void> | undefined;
 const JOB_POLL_INTERVAL_MS = 3000;
 const JOB_POLL_TIMEOUT_MS = 60 * 60 * 1000;
+const JOB_REQUEST_TIMEOUT_MS = 15_000;
+// How long to wait for the network before giving the job up entirely. Without
+// this a device that reconnects after a long outage would abandon a job that the
+// server is still working on.
+const JOB_OFFLINE_GRACE_MS = 10 * 60 * 1000;
 
 class AudioJobUnavailableError extends Error {}
 
@@ -142,21 +148,94 @@ function readMessage(payload: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Connectivity is tracked by one long-lived subscription rather than a fetch
+ * per poll: NetInfo does not expose current state synchronously, and polling a
+ * 3-second loop through fetch() would add real overhead.
+ */
+let networkAvailable = true;
+let networkWatcherStarted = false;
+
+function ensureNetworkWatcher(): void {
+  if (networkWatcherStarted) {
+    return;
+  }
+  networkWatcherStarted = true;
+  NetInfo.addEventListener((state) => {
+    networkAvailable = state.isConnected !== false && state.isInternetReachable !== false;
+  });
+}
+
+/** Resolves immediately when online, otherwise on the next reconnect. */
+function waitForConnection(): Promise<void> {
+  ensureNetworkWatcher();
+  if (networkAvailable) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      if (state.isConnected === false || state.isInternetReachable === false) {
+        // Still down. Keep this single listener until the device is actually
+        // back, rather than churning a subscription per poll.
+        return;
+      }
+      unsubscribe();
+      resolve();
+    });
+  });
+}
+
+/** True for the transport failures that a dropped connection produces. */
+function isTransientNetworkError(error: unknown): boolean {
+  return (
+    error instanceof TypeError ||
+    (error instanceof Error && /network|fetch|abort|timeout/i.test(error.message))
+  );
+}
+
 async function getAudioJobResult(
   jobId: string,
   recordings: ClassRecording[],
   recordingId: string,
 ): Promise<unknown> {
   const deadline = Date.now() + JOB_POLL_TIMEOUT_MS;
+  let offlineSince: number | undefined;
   while (Date.now() < deadline) {
+    // A dropped connection pauses the loop instead of throwing. The job keeps
+    // running on the server and the same job id is reused when the device is
+    // back, so no work is lost and the UI keeps its last known progress.
+    await waitForConnection();
+    if (Date.now() >= deadline) {
+      break;
+    }
+
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15_000);
+    const timeout = setTimeout(() => controller.abort(), JOB_REQUEST_TIMEOUT_MS);
     let response: Response;
     try {
       response = await fetch(
         `${AUDIO_PROCESS_JOBS_ENDPOINT}/${encodeURIComponent(jobId)}`,
         { signal: controller.signal },
       );
+      offlineSince = undefined;
+    } catch (error) {
+      if (!isTransientNetworkError(error) || Date.now() >= deadline) {
+        throw error;
+      }
+      offlineSince ??= Date.now();
+      const latestRecordings = await loadRecordings();
+      await updateRecording(latestRecordings, recordingId, {
+        status: "SYNCING",
+        processingJobId: jobId,
+        syncMessage: "Waiting for a connection…",
+      });
+      if (Date.now() - offlineSince > JOB_OFFLINE_GRACE_MS) {
+        throw new Error(
+          "The connection was lost for too long. The job is saved and will resume when sync runs again.",
+        );
+      }
+      await waitForConnection();
+      continue;
     } finally {
       clearTimeout(timeout);
     }

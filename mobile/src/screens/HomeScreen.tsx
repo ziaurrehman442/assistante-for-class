@@ -494,7 +494,7 @@ export function HomeScreen() {
               <View
                 style={[
                   styles.progressFill,
-                  { width: `${Math.max(2, Math.min(100, item.syncProgress))}%` },
+                  { width: `${Math.max(0, Math.min(100, item.syncProgress))}%` },
                 ]}
               />
             </View>
