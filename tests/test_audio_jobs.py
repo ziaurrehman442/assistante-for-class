@@ -13,7 +13,7 @@ class AudioJobTests(unittest.TestCase):
     def test_idempotency_key_reuses_active_job_and_discards_duplicate_upload(self):
         started = Event()
 
-        def process(_app, _audio_path):
+        def process(_app, _audio_path, progress=None):
             started.set()
             return {"transcript": "complete"}
 
@@ -41,7 +41,7 @@ class AudioJobTests(unittest.TestCase):
                 self.assertEqual(job["result"], {"transcript": "complete"})
 
     def test_processed_audio_is_deleted_when_retention_is_off(self):
-        def process(_app, _audio_path):
+        def process(_app, _audio_path, progress=None):
             return {"transcript": "complete"}
 
         app = _StubApp(upload_folder=None, keep=False)
@@ -60,7 +60,7 @@ class AudioJobTests(unittest.TestCase):
             self.assertFalse(audio_path.exists())
 
     def test_processed_audio_is_retained_when_retention_is_on(self):
-        def process(_app, _audio_path):
+        def process(_app, _audio_path, progress=None):
             return {"transcript": "complete"}
 
         app = _StubApp(upload_folder=None, keep=True)
@@ -94,7 +94,7 @@ class AudioJobTests(unittest.TestCase):
             new_path = Path(directory) / "new.wav"
             new_path.write_bytes(b"audio")
 
-            def process(_app, _audio_path):
+            def process(_app, _audio_path, progress=None):
                 return {"transcript": "complete"}
 
             with patch("app.services.audio_jobs.process_audio_file", side_effect=process):

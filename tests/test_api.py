@@ -113,6 +113,8 @@ class AudioApiTests(unittest.TestCase):
             "result": {"transcript": "lesson", "easy_notes": []},
             "error": None,
             "status_code": None,
+            "progress": 100,
+            "message": "Complete",
         },
     )
     def test_audio_job_status_returns_completed_result(self, _get_job):
@@ -123,6 +125,8 @@ class AudioApiTests(unittest.TestCase):
             {
                 "status": "completed",
                 "result": {"transcript": "lesson", "easy_notes": []},
+                "progress": 100,
+                "message": "Complete",
             },
         )
 
@@ -133,12 +137,21 @@ class AudioApiTests(unittest.TestCase):
             "result": None,
             "error": None,
             "status_code": None,
+            "progress": 45,
+            "message": "Identifying speakers...",
         },
     )
     def test_audio_job_status_returns_processing(self, _get_job):
         response = self.client.get("/api/process-audio/jobs/job-123")
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.get_json(), {"status": "processing"})
+        self.assertEqual(
+            response.get_json(),
+            {
+                "status": "processing",
+                "progress": 45,
+                "message": "Identifying speakers...",
+            },
+        )
 
     @patch("app.routes.audio.get_audio_job", return_value=None)
     def test_audio_job_status_returns_not_found_for_expired_job(self, _get_job):
@@ -266,3 +279,104 @@ class AudioApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JobStatusApiTests(unittest.TestCase):
+    def setUp(self):
+        self.client = create_app(TestConfig).test_client()
+
+    @patch("app.routes.audio.enqueue_audio_job", return_value="job-123")
+    def test_upload_audio_returns_job_id_and_zero_progress(self, enqueue):
+        response = self.client.post(
+            "/api/upload-audio",
+            data={"file": (io.BytesIO(b"audio bytes"), "lesson.wav")},
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            response.get_json(),
+            {"job_id": "job-123", "status": "processing", "progress": 0},
+        )
+        self.assertEqual(response.headers["Location"], "/api/job-status/job-123")
+        enqueue.assert_called_once()
+
+    @patch("app.routes.audio.enqueue_audio_job", return_value="job-123")
+    def test_upload_audio_still_validates_the_format(self, _enqueue):
+        response = self.client.post(
+            "/api/upload-audio",
+            data={"file": (io.BytesIO(b"data"), "notes.txt")},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    @patch(
+        "app.routes.audio.get_audio_job",
+        return_value={
+            "status": "processing",
+            "result": None,
+            "error": None,
+            "status_code": None,
+            "progress": 45,
+            "message": "Identifying speakers...",
+        },
+    )
+    def test_job_status_reports_progress_with_null_results(self, _get_job):
+        response = self.client.get("/api/job-status/job-123")
+
+        self.assertEqual(response.status_code, 202)
+        payload = response.get_json()
+        self.assertEqual(payload["progress"], 45)
+        self.assertEqual(payload["message"], "Identifying speakers...")
+        self.assertIsNone(payload["transcript"])
+        self.assertIsNone(payload["detailed_notes"])
+        self.assertIsNone(payload["quiz"])
+
+    @patch(
+        "app.routes.audio.get_audio_job",
+        return_value={
+            "status": "completed",
+            "result": {
+                "transcript": "[00:00] Teacher: Recursion.",
+                "detailed_class_notes": {
+                    "main_topics": ["Recursion"],
+                    "definitions": ["Base case: simplest case."],
+                    "teacher_explanations": ["Call yourself."],
+                    "qa": [{"question": "What is it?", "answer": "Recursion."}],
+                },
+                "easy_notes": ["Base case", "Recursive case"],
+                "revision_quiz": {
+                    "mcqs": [
+                        {
+                            "question": "Recursion is?",
+                            "options": ["A", "B", "C", "D"],
+                            "answer": "B",
+                        }
+                    ],
+                    "conceptual_questions": ["Why a base case?"],
+                },
+                "warnings": [],
+            },
+            "error": None,
+            "status_code": None,
+            "progress": 100,
+            "message": "Complete",
+        },
+    )
+    def test_job_status_flattens_materials_when_completed(self, _get_job):
+        response = self.client.get("/api/job-status/job-123")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["status"], "completed")
+        self.assertEqual(payload["transcript"], "[00:00] Teacher: Recursion.")
+        self.assertIn("Base case: simplest case.", payload["detailed_notes"])
+        self.assertIn("- Base case", payload["easy_notes"])
+        self.assertIn("B. B", payload["quiz"])
+        self.assertIn("Answer: B", payload["quiz"])
+        self.assertIn("Why a base case?", payload["quiz"])
+
+    @patch("app.routes.audio.get_audio_job", return_value=None)
+    def test_unknown_job_reports_failed_with_404(self, _get_job):
+        response = self.client.get("/api/job-status/missing")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["status"], "failed")

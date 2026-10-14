@@ -124,3 +124,54 @@ class AudioProcessingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProgressReportingTests(unittest.TestCase):
+    def test_stages_are_reported_in_a_rising_order(self):
+        app = create_app(TestConfig)
+        dialogue = [
+            {
+                "speaker_id": "a",
+                "speaker_name": "Teacher",
+                "overlapping_speakers": [],
+                "start": 0.0,
+                "end": 1.0,
+                "text": "Fine.",
+            }
+        ]
+        seen = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "lesson.wav"
+            audio_path.touch()
+            with patch(
+                "app.services.audio_processing.transcribe_audio",
+                return_value=[{"start": 0.0, "end": 1.0, "text": " Fine"}],
+            ), patch(
+                "app.services.audio_processing.diarize_and_label",
+                return_value=(dialogue, []),
+            ), patch(
+                "app.services.audio_processing.generate_study_materials",
+                return_value={"easy_notes": ["Point"]},
+            ):
+                process_audio_file(
+                    app,
+                    audio_path,
+                    progress=lambda value, message: seen.append((value, message)),
+                )
+
+        values = [value for value, _ in seen]
+        self.assertEqual(values, sorted(values), "progress must never move backwards")
+        self.assertTrue(all(0 <= value <= 100 for value in values))
+        self.assertEqual(values[0], 5)
+        self.assertEqual(values[-1], 95)
+        self.assertIn("Transcribing audio...", [message for _, message in seen])
+
+    def test_progress_is_optional(self):
+        app = create_app(TestConfig)
+        with tempfile.TemporaryDirectory() as directory:
+            audio_path = Path(directory) / "silent.wav"
+            audio_path.touch()
+            with patch("app.services.audio_processing.transcribe_audio", return_value=[]):
+                result = process_audio_file(app, audio_path)
+        self.assertEqual(result["warnings"], [])
