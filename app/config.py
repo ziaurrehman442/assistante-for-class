@@ -46,6 +46,13 @@ class Config:
     OLLAMA_AVAILABILITY_TIMEOUT_SECONDS = int(
         os.environ.get("OLLAMA_AVAILABILITY_TIMEOUT_SECONDS", "5")
     )
+    # A client-transcribed lecture can be hours long, so the transcript is split
+    # and generated a piece at a time instead of overflowing the context window.
+    NOTE_CHUNK_CHARS = int(os.environ.get("NOTE_CHUNK_CHARS", "6000"))
+    NOTE_MAX_MCQS = int(os.environ.get("NOTE_MAX_MCQS", "5"))
+    MAX_TRANSCRIPT_CHARS = int(
+        os.environ.get("MAX_TRANSCRIPT_CHARS", str(2 * 1024 * 1024))
+    )
     # Faster-Whisper runs on CPU. "small" mis-transcribes Urdu and
     # English-Urdu code-switching badly, so "medium" is the default; it needs
     # roughly 2.5-3 GB of RAM while a recording is being processed.

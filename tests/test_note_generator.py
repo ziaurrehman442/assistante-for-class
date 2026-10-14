@@ -6,6 +6,9 @@ from unittest.mock import Mock, patch
 
 from app.services.note_generator import (
     NoteGenerationError,
+    chunk_transcript,
+    merge_materials,
+    _validate_materials,
     check_ollama_available,
     format_dialogue,
     generate_study_materials,
@@ -229,3 +232,58 @@ class OllamaAvailabilityTests(unittest.TestCase):
                 )
 
         post.assert_not_called()
+
+
+class ChunkingTests(unittest.TestCase):
+    def test_short_transcript_is_a_single_chunk(self):
+        self.assertEqual(chunk_transcript("one line", 6000), ["one line"])
+
+    def test_empty_transcript_yields_no_chunks(self):
+        self.assertEqual(chunk_transcript("   ", 6000), [])
+
+    def test_split_preserves_every_word(self):
+        lines = [
+            f"[00:{i // 60:02d}:{i % 60:02d}] Teacher 1: line {i} " + "word " * 30
+            for i in range(60)
+        ]
+        text = "\n".join(lines)
+
+        chunks = chunk_transcript(text, 6000)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= 6000 + 200 for chunk in chunks))
+        self.assertEqual(
+            " ".join(chunks).split(), text.split(), "no transcript text may be lost"
+        )
+
+    def test_split_never_cuts_a_speaker_turn_in_half(self):
+        text = "\n".join(f"turn {index}" for index in range(200))
+
+        for chunk in chunk_transcript(text, 200):
+            for line in chunk.splitlines():
+                self.assertTrue(line.startswith("turn "), line)
+
+    def test_merged_materials_keep_the_client_schema(self):
+        chunk_materials = {
+            "detailed_class_notes": {
+                "main_topics": ["Topic"],
+                "definitions": ["Term: meaning"],
+                "teacher_explanations": ["Explained"],
+                "qa": [{"question": "Q?", "answer": "A."}],
+            },
+            "easy_notes": ["Recall this"],
+            "revision_quiz": {
+                "mcqs": [
+                    {"question": f"Q{n}?", "options": ["A", "B", "C", "D"], "answer": "A"}
+                    for n in range(5)
+                ],
+                "conceptual_questions": ["a?", "b?", "c?"],
+            },
+        }
+
+        merged = merge_materials([chunk_materials, chunk_materials], max_mcqs=5)
+
+        self.assertTrue(_validate_materials(merged))
+        self.assertEqual(len(merged["revision_quiz"]["mcqs"]), 5)
+        self.assertEqual(len(merged["revision_quiz"]["conceptual_questions"]), 3)
+        self.assertEqual(len(merged["detailed_class_notes"]["definitions"]), 2)

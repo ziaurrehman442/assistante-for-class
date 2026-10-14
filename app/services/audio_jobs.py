@@ -121,6 +121,87 @@ def update_job_progress(job_id: str, progress: int, message: str) -> None:
         job["updated_at"] = _now()
 
 
+def _run_notes_job(app, job_id: str, transcript: str):
+    """Generate notes from a transcript the client already transcribed.
+
+    Shares the job store with audio jobs so one status endpoint covers both, and
+    has no audio_path cleanup because there is no upload to remove.
+    """
+    from app.services.note_generator import NoteGenerationError, generate_notes_for_transcript
+
+    with _jobs_lock:
+        _jobs[job_id]["status"] = "processing"
+        _jobs[job_id]["message"] = "Generating notes..."
+        _jobs[job_id]["updated_at"] = _now()
+
+    def report(progress: int, message: str) -> None:
+        update_job_progress(job_id, progress, message)
+
+    try:
+        with app.app_context():
+            materials = generate_notes_for_transcript(
+                transcript,
+                ollama_url=app.config["OLLAMA_URL"],
+                model=app.config["OLLAMA_MODEL"],
+                timeout=app.config["OLLAMA_TIMEOUT_SECONDS"],
+                chunk_chars=app.config["NOTE_CHUNK_CHARS"],
+                max_mcqs=app.config["NOTE_MAX_MCQS"],
+                progress=report,
+            )
+        with _jobs_lock:
+            _jobs[job_id].update(
+                status="completed",
+                result={"transcript": transcript, **materials},
+                progress=100,
+                message="Complete",
+                updated_at=_now(),
+            )
+    except NoteGenerationError as error:
+        logger.warning("Note generation job failed: %s", error)
+        with _jobs_lock:
+            _jobs[job_id].update(
+                status="failed",
+                error=str(error),
+                status_code=502,
+                message=str(error),
+                updated_at=_now(),
+            )
+    except Exception:
+        logger.exception("Unexpected note generation job failure")
+        with _jobs_lock:
+            _jobs[job_id].update(
+                status="failed",
+                error="An unexpected error occurred while generating notes.",
+                status_code=500,
+                message="An unexpected error occurred while generating notes.",
+                updated_at=_now(),
+            )
+
+
+def enqueue_notes_job(app, transcript: str) -> str:
+    job_id = uuid.uuid4().hex
+    with _jobs_lock:
+        _prune_expired_jobs(_now())
+        _jobs[job_id] = {
+            "status": "queued",
+            "result": None,
+            "error": None,
+            "status_code": None,
+            "progress": 0,
+            "message": "Queued",
+            "updated_at": _now(),
+        }
+    _executor.submit(_run_notes_job, app, job_id, transcript)
+    return job_id
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None or job["status"] in ("completed", "failed"):
+            return
+        job["progress"] = max(0, min(100, int(progress)))
+        job["message"] = message
+        job["updated_at"] = _now()
+
+
 def enqueue_audio_job(
     app,
     audio_path: Path,

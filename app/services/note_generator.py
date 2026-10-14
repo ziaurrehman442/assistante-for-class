@@ -102,6 +102,93 @@ def format_dialogue(dialogue: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def chunk_transcript(transcript: str, chunk_chars: int, min_chars: int = 200) -> list[str]:
+    """Split a transcript into chunks that each fit the model's context.
+
+    A long lecture does not fit in one prompt. Ollama truncates whatever exceeds
+    the context window, so the tail of a 3-hour lecture would be silently ignored
+    and the model would still be asked to describe the whole thing.
+
+    Splits on line boundaries, because each line here is one speaker turn and
+    cutting mid-turn produces a fragment that reads as broken speech.
+    """
+    text = transcript.strip()
+    if not text:
+        return []
+
+    lines = text.splitlines() or [text]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_length = 0
+
+    for line in lines:
+        line_length = len(line) + 1
+        if current and current_length + line_length > chunk_chars:
+            chunks.append("\n".join(current))
+            current = []
+            current_length = 0
+        current.append(line)
+        current_length += line_length
+
+    if current:
+        tail = "\n".join(current)
+        # Never emit a stub that would waste a generation call.
+        if chunks and len(tail) < min_chars:
+            chunks[-1] = f"{chunks[-1]}\n{tail}"
+        else:
+            chunks.append(tail)
+
+    return chunks
+
+
+def merge_materials(per_chunk: list[dict[str, object]], max_mcqs: int) -> dict[str, object]:
+    """Combine per-chunk materials into one set, keeping the schema intact.
+
+    The mobile client renders a fixed set of keys, so the merged result has to
+    match STUDY_MATERIAL_SCHEMA exactly or the client rejects it.
+    """
+    topics: list[str] = []
+    definitions: list[str] = []
+    explanations: list[str] = []
+    qa: list[dict[str, str]] = []
+    easy_notes: list[str] = []
+    mcqs: list[dict] = []
+    conceptual: list[str] = []
+
+    for index, materials in enumerate(per_chunk, start=1):
+        notes = materials.get("detailed_class_notes") or {}
+        quiz = materials.get("revision_quiz") or {}
+
+        label = "" if len(per_chunk) == 1 else f"Part {index}: "
+        topics.extend(f"{label}{item}" for item in notes.get("main_topics") or [])
+        definitions.extend(f"{label}{item}" for item in notes.get("definitions") or [])
+        explanations.extend(
+            f"{label}{item}" for item in notes.get("teacher_explanations") or []
+        )
+        qa.extend(notes.get("qa") or [])
+        easy_notes.extend(f"{label}{item}" for item in materials.get("easy_notes") or [])
+
+        # Taking five MCQs from every chunk would produce fifty for one lecture,
+        # so the quiz is capped and drawn from the earliest chunks.
+        for item in quiz.get("mcqs") or []:
+            if len(mcqs) >= max_mcqs:
+                break
+            mcqs.append(item)
+        if len(conceptual) < 3:
+            conceptual.extend((quiz.get("conceptual_questions") or [])[: 3 - len(conceptual)])
+
+    return {
+        "detailed_class_notes": {
+            "main_topics": topics,
+            "definitions": definitions,
+            "teacher_explanations": explanations,
+            "qa": qa,
+        },
+        "easy_notes": easy_notes,
+        "revision_quiz": {"mcqs": mcqs, "conceptual_questions": conceptual},
+    }
+
+
 def _is_string_list(value, expected_length=None):
     return (
         isinstance(value, list)
@@ -234,6 +321,7 @@ def generate_study_materials(
     timeout: int,
     max_attempts: int = 3,
     availability_timeout: int = 5,
+    num_ctx: int = 8192,
 ) -> dict[str, object]:
     check_ollama_available(ollama_url, model, availability_timeout)
 
@@ -282,6 +370,11 @@ def generate_study_materials(
                     "prompt": prompt,
                     "stream": False,
                     "format": STUDY_MATERIAL_SCHEMA,
+                    # num_ctx defaults to 4096, which silently truncates any
+                    # real lecture. Sizing it to hold a chunk plus the prompt and
+                    # the reply is what stops generation running past the client
+                    # timeout and wasting CPU on a truncated lecture.
+                    "options": {"num_ctx": num_ctx},
                 },
                 timeout=timeout,
             )
@@ -354,3 +447,63 @@ def generate_study_materials(
             ) from error
 
     raise last_error or NoteGenerationError("Could not generate study materials.")
+
+
+def generate_notes_for_transcript(
+    transcript: str,
+    ollama_url: str,
+    model: str,
+    timeout: int,
+    chunk_chars: int = 6000,
+    max_mcqs: int = 5,
+    progress=None,
+) -> dict[str, object]:
+    """Generate study materials for a whole lecture, one chunk at a time.
+
+    Used by the text-only endpoint, where the client sends a transcript that can
+    be far longer than one model context. Each chunk is generated and validated
+    independently so one bad chunk cannot discard the others.
+    """
+    chunks = chunk_transcript(transcript, chunk_chars)
+    if not chunks:
+        raise NoteGenerationError("The transcript was empty.")
+
+    check_ollama_available(ollama_url, model, 5)
+
+    logger.info("Generating notes for %d transcript chunk(s)", len(chunks))
+    per_chunk: list[dict[str, object]] = []
+    failures: list[str] = []
+
+    for index, chunk in enumerate(chunks, start=1):
+        if progress is not None:
+            percent = int((index - 1) / len(chunks) * 100)
+            progress(percent, f"Generating notes for part {index} of {len(chunks)}...")
+        try:
+            per_chunk.append(
+                generate_study_materials(
+                    chunk,
+                    ollama_url=ollama_url,
+                    model=model,
+                    timeout=timeout,
+                    num_ctx=max(8192, chunk_chars),
+                )
+            )
+        except NoteGenerationError as error:
+            # Keep going: a chunk that times out should cost that chunk's notes,
+            # not the entire lecture's.
+            logger.warning("Chunk %d/%d failed: %s", index, len(chunks), error)
+            failures.append(f"Part {index}: {error}")
+
+    if not per_chunk:
+        raise NoteGenerationError(
+            "Could not generate study materials for any part of this lecture. "
+            + (failures[0] if failures else "")
+        )
+
+    if progress is not None:
+        progress(95, "Merging the generated notes...")
+
+    merged = merge_materials(per_chunk, max_mcqs)
+    if failures:
+        merged["warnings"] = failures
+    return merged

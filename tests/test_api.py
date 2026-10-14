@@ -20,6 +20,10 @@ class TestConfig:
     OLLAMA_URL = "http://localhost:11434"
     OLLAMA_MODEL = "qwen2.5:3b"
     OLLAMA_TIMEOUT_SECONDS = 300
+    OLLAMA_AVAILABILITY_TIMEOUT_SECONDS = 5
+    NOTE_CHUNK_CHARS = 6000
+    NOTE_MAX_MCQS = 5
+    MAX_TRANSCRIPT_CHARS = 1000
     HUGGINGFACE_TOKEN = "test-token"
     SPEAKER_MATCH_THRESHOLD = 0.78
     PROCESS_AUDIO_RATE_LIMIT = 10
@@ -380,3 +384,43 @@ class JobStatusApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_json()["status"], "failed")
+
+
+class GenerateNotesApiTests(unittest.TestCase):
+    def setUp(self):
+        self.client = create_app(TestConfig).test_client()
+
+    def test_missing_transcript_is_rejected(self):
+        response = self.client.post("/api/generate-notes", json={})
+        self.assertEqual(response.status_code, 400)
+
+    def test_blank_transcript_is_rejected(self):
+        response = self.client.post("/api/generate-notes", json={"transcript": "   "})
+        self.assertEqual(response.status_code, 400)
+
+    def test_non_json_body_is_rejected(self):
+        response = self.client.post("/api/generate-notes", data="not json", content_type="text/plain")
+        self.assertEqual(response.status_code, 400)
+
+    @patch("app.routes.audio.enqueue_notes_job", return_value="notes-1")
+    def test_transcript_is_queued_without_audio(self, enqueue):
+        response = self.client.post(
+            "/api/generate-notes", json={"transcript": "Teacher: hello class."}
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(
+            response.get_json(),
+            {"job_id": "notes-1", "status": "processing", "progress": 0},
+        )
+        self.assertEqual(response.headers["Location"], "/api/job-status/notes-1")
+        enqueue.assert_called_once()
+        self.assertEqual(enqueue.call_args.args[1], "Teacher: hello class.")
+
+    @patch("app.routes.audio.enqueue_notes_job", return_value="notes-1")
+    def test_oversized_transcript_is_rejected(self, enqueue):
+        response = self.client.post(
+            "/api/generate-notes", json={"transcript": "a" * (TestConfig.MAX_TRANSCRIPT_CHARS + 1)}
+        )
+        self.assertEqual(response.status_code, 413)
+        enqueue.assert_not_called()

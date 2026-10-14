@@ -6,7 +6,7 @@ from flask import Blueprint, current_app, jsonify, request
 from werkzeug.utils import secure_filename
 
 from app.config import origin_is_allowed
-from app.services.audio_jobs import enqueue_audio_job, get_audio_job
+from app.services.audio_jobs import enqueue_audio_job, enqueue_notes_job, get_audio_job
 from app.services.note_generator import (
     NoteGenerationError,
     format_dialogue,
@@ -184,6 +184,48 @@ def job_status(job_id):
         payload["warnings"] = (result or {}).get("warnings") or []
         return jsonify(**payload), 200
     return jsonify(**payload), 202
+
+
+@audio_bp.post("/api/generate-notes")
+def generate_notes():
+    """Accept a transcript the client transcribed, and return notes for it.
+
+    No audio is uploaded and nothing is transcribed here, so this endpoint costs
+    only the Ollama generation the client actually asked for.
+    """
+    origin = request.headers.get("Origin")
+    if origin and not origin_is_allowed(origin, current_app.config["ALLOWED_ORIGINS"]):
+        return jsonify(error="This request origin is not allowed by the server configuration."), 403
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(error="Provide a JSON request body."), 400
+
+    transcript = body.get("transcript")
+    if not isinstance(transcript, str) or not transcript.strip():
+        return jsonify(error="Provide a non-empty 'transcript' string."), 400
+
+    limit = current_app.config["MAX_TRANSCRIPT_CHARS"]
+    if len(transcript) > limit:
+        return jsonify(error=f"The transcript exceeds the {limit} character limit."), 413
+
+    retry_after = consume_request(
+        request.remote_addr or "unknown",
+        current_app.config["PROCESS_AUDIO_RATE_LIMIT"],
+        current_app.config["PROCESS_AUDIO_RATE_WINDOW_SECONDS"],
+    )
+    if retry_after is not None:
+        response = jsonify(error="Too many requests. Please try again later.")
+        response.headers["Retry-After"] = str(retry_after)
+        return response, 429
+
+    job_id = enqueue_notes_job(current_app._get_current_object(), transcript)
+    logger.info("Queued note generation job %s for %d characters", job_id, len(transcript))
+    return (
+        jsonify(job_id=job_id, status="processing", progress=0),
+        202,
+        {"Location": f"/api/job-status/{job_id}"},
+    )
 
 
 @audio_bp.get("/api/process-audio/jobs/<job_id>")
