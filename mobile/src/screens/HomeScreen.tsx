@@ -452,7 +452,9 @@ export function HomeScreen() {
       item.status === "SYNCED"
         ? "Notes ready"
         : item.status === "SYNCING"
-          ? "Syncing…"
+          ? item.syncProgress !== undefined
+            ? `Processing… ${item.syncProgress}%`
+            : "Syncing…"
           : "Saved offline";
     return (
       <View style={[styles.recordingCard, selected && styles.selectedCard]}>
@@ -487,6 +489,19 @@ export function HomeScreen() {
             ]}
           />
           <Text style={styles.syncLabel}>{statusLabel}</Text>
+          {item.status === "SYNCING" && item.syncProgress !== undefined ? (
+            <View style={styles.progressTrack}>
+              <View
+                style={[
+                  styles.progressFill,
+                  { width: `${Math.max(2, Math.min(100, item.syncProgress))}%` },
+                ]}
+              />
+            </View>
+          ) : null}
+          {item.status === "SYNCING" && item.syncMessage ? (
+            <Text style={styles.progressText}>{item.syncMessage}</Text>
+          ) : null}
           {item.status === "PENDING_SYNC" && isOnline ? (
             <Pressable
               style={styles.syncNow}
@@ -834,6 +849,16 @@ const styles = StyleSheet.create({
   syncedDot: { backgroundColor: "#36A978" },
   syncingDot: { backgroundColor: "#7664D8" },
   syncLabel: { color: "#888598", fontSize: 11, fontWeight: "600" },
+  progressTrack: {
+    flex: 1,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "#E6E3F0",
+    marginLeft: 8,
+    overflow: "hidden",
+  },
+  progressFill: { height: 4, borderRadius: 2, backgroundColor: "#7664D8" },
+  progressText: { color: "#A8A5B5", fontSize: 10, marginTop: 4 },
   syncNow: { marginLeft: "auto", padding: 4 },
   syncNowText: { color: "#6857C3", fontSize: 12, fontWeight: "700" },
   errorText: { color: "#BC5260", fontSize: 12, lineHeight: 18, marginTop: 8 },

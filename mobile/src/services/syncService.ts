@@ -123,6 +123,25 @@ function waitForNextPoll(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, JOB_POLL_INTERVAL_MS));
 }
 
+/** Progress is advisory: an older server simply omits it. */
+function readProgress(payload: unknown): number | undefined {
+  if (
+    isObject(payload) &&
+    typeof payload.progress === "number" &&
+    Number.isFinite(payload.progress)
+  ) {
+    return Math.max(0, Math.min(100, Math.round(payload.progress)));
+  }
+  return undefined;
+}
+
+function readMessage(payload: unknown): string | undefined {
+  if (isObject(payload) && typeof payload.message === "string" && payload.message.trim()) {
+    return payload.message.trim();
+  }
+  return undefined;
+}
+
 async function getAudioJobResult(
   jobId: string,
   recordings: ClassRecording[],
@@ -176,9 +195,14 @@ async function getAudioJobResult(
     }
 
     const latestRecordings = await loadRecordings();
+    // The job id is re-saved on every poll, so an app kill, a route change or a
+    // dropped connection resumes from this exact job rather than re-uploading.
+    // Progress rides along so the list can show a live percentage.
     await updateRecording(latestRecordings, recordingId, {
       status: "SYNCING",
       processingJobId: jobId,
+      syncProgress: readProgress(payload),
+      syncMessage: readMessage(payload),
     });
     await waitForNextPoll();
   }
@@ -311,6 +335,8 @@ async function syncQueue(): Promise<void> {
       recordings = await updateRecording(latestRecordings, recording.id, {
         status: "SYNCED",
         processingJobId: undefined,
+        syncProgress: undefined,
+        syncMessage: undefined,
         lastError: undefined,
         transcript: result.transcript,
         dialogue: result.dialogue,

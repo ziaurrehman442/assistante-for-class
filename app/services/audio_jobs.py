@@ -69,12 +69,17 @@ def _run_job(app, job_id: str, audio_path: Path):
         _jobs[job_id]["status"] = "processing"
         _jobs[job_id]["updated_at"] = _now()
 
+    def report(progress: int, message: str) -> None:
+        update_job_progress(job_id, progress, message)
+
     try:
-        result = process_audio_file(app, audio_path)
+        result = process_audio_file(app, audio_path, progress=report)
         with _jobs_lock:
             _jobs[job_id].update(
                 status="completed",
                 result=result,
+                progress=100,
+                message="Complete",
                 updated_at=_now(),
             )
     except AudioProcessingError as error:
@@ -83,6 +88,7 @@ def _run_job(app, job_id: str, audio_path: Path):
                 status="failed",
                 error=str(error),
                 status_code=error.status_code,
+                message=str(error),
                 updated_at=_now(),
             )
     except Exception:
@@ -92,11 +98,27 @@ def _run_job(app, job_id: str, audio_path: Path):
                 status="failed",
                 error="An unexpected audio processing error occurred.",
                 status_code=500,
+                message="An unexpected audio processing error occurred.",
                 updated_at=_now(),
             )
     finally:
         if not _keep_uploaded_audio(app):
             audio_path.unlink(missing_ok=True)
+
+
+def update_job_progress(job_id: str, progress: int, message: str) -> None:
+    """Record how far a running job has got, for the client's progress bar.
+
+    A finished job keeps its final state: a late callback from a stage that was
+    still unwinding must not turn a completed job back into a partial one.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None or job["status"] in ("completed", "failed"):
+            return
+        job["progress"] = max(0, min(100, int(progress)))
+        job["message"] = message
+        job["updated_at"] = _now()
 
 
 def enqueue_audio_job(
@@ -125,6 +147,8 @@ def enqueue_audio_job(
             "result": None,
             "error": None,
             "status_code": None,
+            "progress": 0,
+            "message": "Queued",
             "updated_at": now,
         }
         if client_idempotency_key:
@@ -150,4 +174,6 @@ def get_audio_job(job_id: str):
             "result": job["result"],
             "error": job["error"],
             "status_code": job["status_code"],
+            "progress": job["progress"],
+            "message": job["message"],
         }

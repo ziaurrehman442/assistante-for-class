@@ -44,6 +44,8 @@ export type ClassRecording = {
   status: RecordingStatus;
   subjectId?: string;
   processingJobId?: string;
+  syncProgress?: number;
+  syncMessage?: string;
   attempt?: number;
   transcript?: string;
   dialogue?: SpeakerTurn[];

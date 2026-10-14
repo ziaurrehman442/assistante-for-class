@@ -13,6 +13,15 @@ from app.services.transcription import (
 
 logger = logging.getLogger(__name__)
 
+# Stage weights. Transcription and diarization dominate the wall clock, so they
+# own most of the range and the percentages never move backwards.
+_STAGE_CLEANING = 5
+_STAGE_TRANSCRIBING = 15
+_STAGE_DIARIZING = 45
+_STAGE_REFINING = 55
+_STAGE_GENERATING = 60
+_STAGE_DONE = 95
+
 
 def _refine_transcript_if_enabled(app, transcript: str) -> str:
     """Clean up the transcript wording, falling back to the original on any error.
@@ -66,7 +75,7 @@ def _empty_materials(message: str, include_in_topics: bool = False) -> dict[str,
     }
 
 
-def _generate_materials_or_degrade(app, transcript: str):
+def _generate_materials_or_degrade(app, transcript: str, progress=None):
     """Generate study materials, but never lose a finished transcript to them.
 
     Transcription is the expensive, irreplaceable part: it needs the recording,
@@ -77,6 +86,8 @@ def _generate_materials_or_degrade(app, transcript: str):
     """
     from app.services.note_generator import NoteGenerationError
 
+    if progress is not None:
+        progress(_STAGE_GENERATING, "Generating notes and revision quiz...")
     try:
         materials = generate_study_materials(
             transcript,
@@ -145,12 +156,18 @@ def _remove_when_done(path: Path):
         path.unlink(missing_ok=True)
 
 
-def process_audio_file(app, audio_path: Path) -> dict:
+def process_audio_file(app, audio_path: Path, progress=None) -> dict:
+    def report(value: int, message: str) -> None:
+        if progress is not None:
+            progress(value, message)
+
     with app.app_context():
         try:
             logger.info("Processing uploaded audio file")
+            report(_STAGE_CLEANING, "Cleaning audio...")
             cleaned_path, cleanup = _cleaned_audio_for(app, audio_path)
             with cleanup as audio_for_inference:
+                report(_STAGE_TRANSCRIBING, "Transcribing audio...")
                 words = transcribe_audio(audio_for_inference)
                 if not words:
                     message = "No speech was detected in this recording."
@@ -163,6 +180,7 @@ def process_audio_file(app, audio_path: Path) -> dict:
                         "warnings": [],
                     }
 
+                report(_STAGE_DIARIZING, "Identifying speakers...")
                 dialogue, speakers = diarize_and_label(
                     audio_for_inference,
                     words,
@@ -171,8 +189,12 @@ def process_audio_file(app, audio_path: Path) -> dict:
                     match_threshold=app.config["SPEAKER_MATCH_THRESHOLD"],
                 )
                 transcript = format_dialogue(dialogue)
+                report(_STAGE_REFINING, "Refining transcript...")
                 transcript = _refine_transcript_if_enabled(app, transcript)
-                materials, warnings = _generate_materials_or_degrade(app, transcript)
+                materials, warnings = _generate_materials_or_degrade(
+                    app, transcript, progress
+                )
+                report(_STAGE_DONE, "Finishing up...")
                 return {
                     "transcript": transcript,
                     "dialogue": dialogue,

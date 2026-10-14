@@ -31,23 +31,54 @@ def health():
     return jsonify(status="ok", audio_processing="async-jobs")
 
 
-@audio_bp.post("/api/process-audio")
-def process_audio():
-    origin = request.headers.get("Origin")
-    if origin and not origin_is_allowed(origin, current_app.config["ALLOWED_ORIGINS"]):
-        return jsonify(error="This request origin is not allowed by the server configuration."), 403
+def _flatten_materials(result):
+    """Render the structured study materials as plain text.
 
-    audio_file = request.files.get("file")
-    if audio_file is None:
-        return jsonify(error="Provide an audio file in the 'file' form field."), 400
-    if not audio_file.filename:
-        return jsonify(error="The uploaded file must have a name."), 400
+    The nested JSON shape stays on /api/process-audio/jobs for the existing
+    client; this renders the same data into readable sections for clients that
+    want to display a section as one block of text.
+    """
+    notes = (result or {}).get("detailed_class_notes") or {}
+    quiz = (result or {}).get("revision_quiz") or {}
 
-    safe_name = secure_filename(audio_file.filename)
-    extension = Path(safe_name).suffix.lower()
-    if not safe_name or extension not in ALLOWED_EXTENSIONS:
-        return jsonify(error="Supported audio formats are .m4a, .mp3, and .wav."), 400
+    detailed = []
+    for label, key in (
+        ("Main topics", "main_topics"),
+        ("Definitions", "definitions"),
+        ("Teacher explanations", "teacher_explanations"),
+    ):
+        items = notes.get(key) or []
+        if items:
+            detailed.append(f"## {label}\n" + "\n".join(f"- {item}" for item in items))
+    qa = notes.get("qa") or []
+    if qa:
+        detailed.append(
+            "## Questions and answers\n"
+            + "\n".join(f"- Q: {item['question']}\n  A: {item['answer']}" for item in qa)
+        )
 
+    mcqs = quiz.get("mcqs") or []
+    conceptual = quiz.get("conceptual_questions") or []
+    quiz_lines = []
+    for number, item in enumerate(mcqs, start=1):
+        options = "\n".join(f"   {chr(65 + i)}. {opt}" for i, opt in enumerate(item["options"]))
+        quiz_lines.append(f"{number}. {item['question']}\n{options}\n   Answer: {item['answer']}")
+    if conceptual:
+        quiz_lines.append("## Conceptual questions\n" + "\n".join(f"- {q}" for q in conceptual))
+
+    return (
+        "\n\n".join(detailed),
+        "\n".join(f"- {item}" for item in ((result or {}).get("easy_notes") or [])),
+        "\n\n".join(quiz_lines),
+    )
+
+
+def _queue_upload(request, audio_file, status_label: str, location: str):
+    """Validate, persist, and queue an upload. Shared by both upload routes.
+
+    status_label and location differ per route so the original route keeps the
+    exact response contract the shipped client already depends on.
+    """
     retry_after = consume_request(
         request.remote_addr or "unknown",
         current_app.config["PROCESS_AUDIO_RATE_LIMIT"],
@@ -60,6 +91,8 @@ def process_audio():
 
     upload_dir = Path(current_app.config["UPLOAD_FOLDER"])
     upload_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = secure_filename(audio_file.filename)
+    extension = Path(safe_name).suffix.lower()
     saved_path = upload_dir / f"{uuid.uuid4().hex}{extension}"
     try:
         audio_file.save(saved_path)
@@ -75,10 +108,13 @@ def process_audio():
             client_idempotency_key=idempotency_key,
         )
         logger.info("Queued audio processing job %s", job_id)
+        payload = {"job_id": job_id, "status": status_label}
+        if status_label == "processing":
+            payload["progress"] = 0
         return (
-            jsonify(job_id=job_id, status="queued"),
+            jsonify(**payload),
             202,
-            {"Location": f"/api/process-audio/jobs/{job_id}"},
+            {"Location": location.format(job_id=job_id)},
         )
     except Exception:
         logger.exception("Could not queue uploaded audio")
@@ -86,16 +122,96 @@ def process_audio():
         return jsonify(error="Could not queue audio for processing."), 500
 
 
+def _upload_request():
+    """Shared checks for the two upload routes."""
+    origin = request.headers.get("Origin")
+    if origin and not origin_is_allowed(origin, current_app.config["ALLOWED_ORIGINS"]):
+        return jsonify(error="This request origin is not allowed by the server configuration."), 403
+
+    audio_file = request.files.get("file")
+    if audio_file is None:
+        return jsonify(error="Provide an audio file in the 'file' form field."), 400
+    if not audio_file.filename:
+        return jsonify(error="The uploaded file must have a name."), 400
+
+    safe_name = secure_filename(audio_file.filename)
+    extension = Path(safe_name).suffix.lower()
+    if not safe_name or extension not in ALLOWED_EXTENSIONS:
+        return jsonify(error="Supported audio formats are .m4a, .mp3, and .wav."), 400
+    return audio_file
+
+
+@audio_bp.post("/api/process-audio")
+def process_audio():
+    audio_file = _upload_request()
+    if not hasattr(audio_file, "filename"):
+        return audio_file
+    return _queue_upload(request, audio_file, "queued", "/api/process-audio/jobs/{job_id}")
+
+
+@audio_bp.post("/api/upload-audio")
+def upload_audio():
+    """Instant, non-blocking upload. Returns immediately with a job to poll."""
+    audio_file = _upload_request()
+    if not hasattr(audio_file, "filename"):
+        return audio_file
+    return _queue_upload(request, audio_file, "processing", "/api/job-status/{job_id}")
+
+
+@audio_bp.get("/api/job-status/<job_id>")
+def job_status(job_id):
+    """Flat, progress-aware view of a job for simple polling clients."""
+    job = get_audio_job(job_id)
+    if job is None:
+        return jsonify(job_id=job_id, status="failed", progress=0, message="Job not found.", transcript=None, detailed_notes=None, easy_notes=None, quiz=None, error="Audio processing job was not found or has expired."), 404
+
+    result = job["result"] if job["status"] == "completed" else None
+    detailed_notes, easy_notes, quiz = _flatten_materials(result)
+    payload = {
+        "job_id": job_id,
+        "status": job["status"],
+        "progress": job["progress"],
+        "message": job["message"],
+        "transcript": (result or {}).get("transcript"),
+        "detailed_notes": detailed_notes or None,
+        "easy_notes": easy_notes or None,
+        "quiz": quiz or None,
+    }
+    if job["status"] == "failed":
+        payload["error"] = job["error"]
+        return jsonify(**payload), job["status_code"] or 500
+    if job["status"] == "completed":
+        payload["warnings"] = (result or {}).get("warnings") or []
+        return jsonify(**payload), 200
+    return jsonify(**payload), 202
+
+
 @audio_bp.get("/api/process-audio/jobs/<job_id>")
 def audio_job_status(job_id):
     job = get_audio_job(job_id)
     if job is None:
         return jsonify(error="Audio processing job was not found or has expired."), 404
+    # progress and message are additive: the shipped client ignores unknown keys,
+    # so this keeps status/result exactly as before while adding a progress bar.
     if job["status"] == "failed":
-        return jsonify(status="failed", error=job["error"])
+        return jsonify(
+            status="failed",
+            error=job["error"],
+            progress=job["progress"],
+            message=job["message"],
+        )
     if job["status"] == "completed":
-        return jsonify(status="completed", result=job["result"])
-    return jsonify(status=job["status"]), 202
+        return jsonify(
+            status="completed",
+            result=job["result"],
+            progress=100,
+            message="Complete",
+        )
+    return jsonify(
+        status=job["status"],
+        progress=job["progress"],
+        message=job["message"],
+    ), 202
 
 
 @audio_bp.put("/api/speaker-profiles/<profile_id>/rename")
