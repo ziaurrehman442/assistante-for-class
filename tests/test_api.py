@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from app import create_app
 from app.config import LOCAL_ORIGIN_PATTERN
+from app.services.recording_store import remember
 from app.services.speaker_profiles import load_profiles, save_profiles
 from app.services.transcription import (
     SpeakerDiarizationError,
@@ -22,6 +23,9 @@ class TestConfig:
     OLLAMA_TIMEOUT_SECONDS = 300
     OLLAMA_AVAILABILITY_TIMEOUT_SECONDS = 5
     NOTE_CHUNK_CHARS = 6000
+    KEEP_UPLOADED_AUDIO = True
+    UPLOAD_RETENTION_DAYS = 7
+    RECORDINGS_MANIFEST_PATH = Path(tempfile.gettempdir()) / "unused-recordings.json"
     NOTE_MAX_MCQS = 5
     MAX_TRANSCRIPT_CHARS = 1000
     HUGGINGFACE_TOKEN = "test-token"
@@ -424,3 +428,69 @@ class GenerateNotesApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 413)
         enqueue.assert_not_called()
+
+
+class ReprocessApiTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.uploads = Path(self.tmp.name)
+        self.manifest = self.uploads / "recordings.json"
+        class C:
+            pass
+
+        self.config = C
+        for key, value in {
+            "TESTING": True,
+            "MAX_CONTENT_LENGTH": 100 * 1024 * 1024,
+            "OLLAMA_URL": "http://localhost:11434",
+            "OLLAMA_MODEL": "qwen2.5:1.5b",
+            "OLLAMA_TIMEOUT_SECONDS": 300,
+            "OLLAMA_AVAILABILITY_TIMEOUT_SECONDS": 5,
+            "NOTE_CHUNK_CHARS": 6000,
+            "NOTE_MAX_MCQS": 5,
+            "MAX_TRANSCRIPT_CHARS": 1000,
+            "HUGGINGFACE_TOKEN": "test-token",
+            "SPEAKER_MATCH_THRESHOLD": 0.78,
+            "PROCESS_AUDIO_RATE_LIMIT": 10,
+            "PROCESS_AUDIO_RATE_WINDOW_SECONDS": 60,
+            "ALLOWED_ORIGINS": [LOCAL_ORIGIN_PATTERN],
+            "UPLOAD_FOLDER": self.uploads,
+            "KEEP_UPLOADED_AUDIO": True,
+            "UPLOAD_RETENTION_DAYS": 7,
+            "RECORDINGS_MANIFEST_PATH": self.manifest,
+        }.items():
+            setattr(self.config, key, value)
+        self.client = create_app(self.config).test_client()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_reprocess_requires_a_recording_id(self):
+        response = self.client.post("/api/reprocess-audio", json={})
+        self.assertEqual(response.status_code, 400)
+
+    @patch("app.routes.audio.enqueue_audio_job", return_value="job-9")
+    def test_reprocess_requeues_the_stored_audio(self, enqueue):
+        audio = self.uploads / "abc.m4a"
+        audio.write_bytes(b"audio")
+        remember("rec-1", audio, self.manifest)
+
+        response = self.client.post("/api/reprocess-audio", json={"recording_id": "rec-1"})
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json()["job_id"], "job-9")
+        self.assertEqual(enqueue.call_args.args[1], audio)
+
+    def test_reprocess_reports_expired_recording_as_404(self):
+        response = self.client.post("/api/reprocess-audio", json={"recording_id": "gone"})
+        self.assertEqual(response.status_code, 404)
+
+    def test_reprocess_is_refused_when_audio_is_not_retained(self):
+        self.config.KEEP_UPLOADED_AUDIO = False
+        # Flask copies config onto the app at creation, so the client has to be
+        # rebuilt for the change to take effect.
+        client = create_app(self.config).test_client()
+
+        response = client.post("/api/reprocess-audio", json={"recording_id": "rec-1"})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("KEEP_UPLOADED_AUDIO", response.get_json()["error"])

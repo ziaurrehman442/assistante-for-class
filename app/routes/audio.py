@@ -7,6 +7,7 @@ from werkzeug.utils import secure_filename
 
 from app.config import origin_is_allowed
 from app.services.audio_jobs import enqueue_audio_job, enqueue_notes_job, get_audio_job
+from app.services.recording_store import lookup, prune, remember
 from app.services.note_generator import (
     NoteGenerationError,
     format_dialogue,
@@ -97,6 +98,9 @@ def _queue_upload(request, audio_file, status_label: str, location: str):
     try:
         audio_file.save(saved_path)
         recording_id = request.headers.get("X-Client-Recording-Id", "")
+        manifest_path = current_app.config["RECORDINGS_MANIFEST_PATH"]
+        prune(Path(current_app.config["UPLOAD_FOLDER"]), manifest_path,
+              current_app.config["UPLOAD_RETENTION_DAYS"])
         idempotency_key = (
             f"{request.remote_addr or 'unknown'}:{recording_id}"
             if recording_id and len(recording_id) <= 128
@@ -107,6 +111,9 @@ def _queue_upload(request, audio_file, status_label: str, location: str):
             saved_path,
             client_idempotency_key=idempotency_key,
         )
+        # Recorded after queueing so a failed write cannot lose the file that the
+        # job is about to process.
+        remember(recording_id, saved_path, manifest_path)
         logger.info("Queued audio processing job %s", job_id)
         payload = {"job_id": job_id, "status": status_label}
         if status_label == "processing":
@@ -221,6 +228,49 @@ def generate_notes():
 
     job_id = enqueue_notes_job(current_app._get_current_object(), transcript)
     logger.info("Queued note generation job %s for %d characters", job_id, len(transcript))
+    return (
+        jsonify(job_id=job_id, status="processing", progress=0),
+        202,
+        {"Location": f"/api/job-status/{job_id}"},
+    )
+
+
+@audio_bp.post("/api/reprocess-audio")
+def reprocess_audio():
+    """Re-run transcription and notes for a recording already uploaded.
+
+    Useful after a model, prompt or filter change: the audio is still in the
+    upload folder, so the original recording does not have to be sent again.
+    """
+    origin = request.headers.get("Origin")
+    if origin and not origin_is_allowed(origin, current_app.config["ALLOWED_ORIGINS"]):
+        return jsonify(error="This request origin is not allowed by the server configuration."), 403
+
+    if not current_app.config.get("KEEP_UPLOADED_AUDIO"):
+        return jsonify(
+            error="Reprocessing needs KEEP_UPLOADED_AUDIO=true, otherwise the "
+            "audio is deleted before it can be reused."
+        ), 409
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(error="Provide a JSON request body."), 400
+
+    recording_id = body.get("recording_id")
+    if not isinstance(recording_id, str) or not recording_id.strip():
+        return jsonify(error="Provide the 'recording_id' returned by the upload."), 400
+
+    upload_dir = Path(current_app.config["UPLOAD_FOLDER"])
+    manifest_path = current_app.config["RECORDINGS_MANIFEST_PATH"]
+    audio_path = lookup(recording_id.strip(), upload_dir, manifest_path)
+    if audio_path is None:
+        return jsonify(
+            error="This recording is no longer stored on the server. It was "
+            "either deleted after processing or passed its retention window."
+        ), 404
+
+    job_id = enqueue_audio_job(current_app._get_current_object(), audio_path)
+    logger.info("Queued reprocessing job %s for recording %s", job_id, recording_id)
     return (
         jsonify(job_id=job_id, status="processing", progress=0),
         202,

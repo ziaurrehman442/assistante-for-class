@@ -99,6 +99,14 @@ class Config:
         "on",
     }
     UPLOAD_RETENTION_DAYS = int(os.environ.get("UPLOAD_RETENTION_DAYS", "7"))
+    # Lets a client reprocess a recording it already uploaded. Job state is
+    # in-memory and expires after hours, so the id-to-file mapping has to be on
+    # disk to outlive it.
+    RECORDINGS_MANIFEST_PATH = Path(
+        os.environ.get(
+            "RECORDINGS_MANIFEST_PATH", str(BASE_DIR / "data" / "recordings.json")
+        )
+    )
     # Optional cleanup of a transcript through a text model, which repairs the
     # mixed-script output that speech-to-text produces for Urdu/English
     # code-switching. It can only reword turns; a failure always falls back to
