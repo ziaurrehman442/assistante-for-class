@@ -28,7 +28,7 @@ import {
   forgetSpeakerProfile,
   renameSpeakerAndRegenerate,
 } from "../services/speakerService";
-import { syncPendingRecordings } from "../services/syncService";
+import { regenerateNotes, syncPendingRecordings } from "../services/syncService";
 import { ClassRecording, RecordingSpeaker, SubjectFolder } from "../types";
 
 type TabName = "Transcript" | "Detailed Notes" | "Easy Notes" | "Revision Quiz";
@@ -173,6 +173,14 @@ export function HomeScreen() {
 
   async function reprocessRecording(recording: ClassRecording) {
     try {
+      // Cheap path first: a transcript already on the device means only the
+      // notes need rebuilding, which skips re-uploading and re-transcribing the
+      // whole recording. This is what most re-processes actually need.
+      if (recording.transcript?.trim() && (await regenerateNotes(recording.id))) {
+        await refreshRecordings();
+        return;
+      }
+
       const latest = await loadRecordings();
       const updated = latest.map((item) =>
         item.id === recording.id

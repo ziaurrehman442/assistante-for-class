@@ -1,6 +1,7 @@
 import {
   AUDIO_PROCESS_ENDPOINT,
   AUDIO_PROCESS_JOBS_ENDPOINT,
+  GENERATE_NOTES_ENDPOINT,
 } from "../config";
 import NetInfo from "@react-native-community/netinfo";
 import { File, UploadType } from "expo-file-system";
@@ -445,4 +446,92 @@ export function syncPendingRecordings(): Promise<void> {
     });
   }
   return activeSync;
+}
+
+/**
+ * Regenerate study material for a recording that already has a transcript.
+ *
+ * Deliberately does not touch the audio. Transcription is the slow, failure-prone
+ * half, and the transcript is already on the device; re-running it would burn
+ * server CPU to reproduce text we already hold. This is the cheap path after a
+ * prompt or model change.
+ *
+ * Returns false when the recording has no transcript yet.
+ */
+export async function regenerateNotes(recordingId: string): Promise<boolean> {
+  const recordings = await loadRecordings();
+  const recording = recordings.find((item) => item.id === recordingId);
+  if (!recording?.transcript?.trim()) {
+    return false;
+  }
+
+  await updateRecording(recordings, recordingId, {
+    status: "SYNCING",
+    processingJobId: undefined,
+    syncProgress: 0,
+    syncMessage: "Sending transcript…",
+  });
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  let jobId: string;
+  try {
+    const response = await fetch(GENERATE_NOTES_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcript: recording.transcript }),
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !isObject(payload) || typeof payload.job_id !== "string") {
+      await updateRecording(await loadRecordings(), recordingId, {
+        status: "SYNCED",
+        syncProgress: undefined,
+        syncMessage: undefined,
+        lastError: getErrorMessage(payload, response.status),
+      });
+      return false;
+    }
+    jobId = payload.job_id;
+  } catch (error) {
+    await updateRecording(await loadRecordings(), recordingId, {
+      status: "SYNCED",
+      syncProgress: undefined,
+      syncMessage: undefined,
+      lastError:
+        error instanceof Error
+          ? `Could not reach the server: ${error.message}`
+          : "Could not reach the server.",
+    });
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  await updateRecording(await loadRecordings(), recordingId, {
+    processingJobId: jobId,
+    syncMessage: "Generating notes…",
+  });
+
+  const result = await getAudioJobResult(jobId, await loadRecordings(), recordingId);
+  const materials = result as { easy_notes?: unknown } | undefined;
+  if (!materials?.easy_notes) {
+    await updateRecording(await loadRecordings(), recordingId, {
+      status: "SYNCED",
+      syncProgress: undefined,
+      syncMessage: undefined,
+      lastError: "The server returned no study material.",
+    });
+    return false;
+  }
+
+  await updateRecording(await loadRecordings(), recordingId, {
+    status: "SYNCED",
+    materials: result as ClassRecording["materials"],
+    processingJobId: undefined,
+    syncProgress: undefined,
+    syncMessage: undefined,
+    lastError: undefined,
+  });
+  return true;
 }
